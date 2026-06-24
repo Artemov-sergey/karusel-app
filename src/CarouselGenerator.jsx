@@ -1,24 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-// На обычном сайте нет встроенного window.storage (он есть только внутри чата).
-// Подставляем простое хранилище на базе localStorage, чтобы черновики сохранялись.
-if (typeof window !== "undefined" && !window.storage) {
-  window.storage = {
-    get: async (key) => {
-      const v = localStorage.getItem(key);
-      return v == null ? null : { key, value: v };
-    },
-    set: async (key, value) => {
-      localStorage.setItem(key, value);
-      return { key, value };
-    },
-    delete: async (key) => {
-      localStorage.removeItem(key);
-      return { key, deleted: true };
-    },
-  };
-}
-
 // ---------- Константы ----------
 const W = 1080;
 const H = 1350;
@@ -672,7 +653,10 @@ export default function CarouselGenerator() {
   const [photoShiftX, setPhotoShiftX] = useState(0);
   const [zoomIndex, setZoomIndex] = useState(null);
   const [dragging, setDragging] = useState(false);
+  const [dragShift, setDragShift] = useState(null); // временный сдвиг при перетаскивании (доля высоты)
   const [showStyling, setShowStyling] = useState(false);
+  const [isMobile] = useState(() => typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
+  const [canShareFiles] = useState(() => typeof navigator !== "undefined" && !!navigator.canShare);
   const [photo, setPhoto] = useState(null);
   const [photoSrc, setPhotoSrc] = useState("");
   const [photoName, setPhotoName] = useState("");
@@ -983,19 +967,21 @@ export default function CarouselGenerator() {
   };
 
   const shareAll = async () => {
+    if (!imgs.length) return;
     try {
       const files = imgs.map((src, i) => {
         const bytes = dataURLtoBytes(src);
         return new File([bytes], "slide-" + String(i + 1).padStart(2, "0") + ".png", { type: "image/png" });
       });
       if (navigator.canShare && navigator.canShare({ files })) {
-        await navigator.share({ files, title: "Карусель" });
+        await navigator.share({ files, title: "Карусель", text: "Слайды карусели" });
+        setNotice("Открылось меню «Поделиться». На айфоне выбери «Сохранить изображения», на Android — «Сохранить в галерею» или «Google Фото» — все слайды лягут в галерею разом.");
       } else {
-        setNotice("Прямой шеринг здесь не поддерживается браузером. Скачай ZIP и перетащи его в чат «Избранное» в Telegram — это два клика.");
+        setNotice("Этот браузер не поддерживает отправку картинок. Сохрани слайды по одному: зажми палец на слайде → «Скачать изображение».");
       }
     } catch (e) {
       if (e && e.name !== "AbortError") {
-        setNotice("Шеринг не сработал. Скачай ZIP и перешли файл себе в Telegram вручную.");
+        setNotice("Не удалось открыть меню. Сохрани слайды по одному: зажми палец на слайде → «Скачать изображение».");
       }
     }
   };
@@ -1032,27 +1018,36 @@ export default function CarouselGenerator() {
   };
 
   // Перетаскивание заголовка на обложке (по вертикали).
-  // Считаем сдвиг от положения курсора внутри превью как долю высоты.
+  // Во время движения обновляем только лёгкий dragShift (CSS-сдвиг надписи),
+  // а тяжёлую перерисовку canvas делаем один раз, когда отпустили палец.
   const coverDragRef = useRef(null);
+  const dragShiftRef = useRef(0);
   const onCoverPointerDown = (e) => {
     e.preventDefault();
-    setDragging(true);
     coverDragRef.current = e.currentTarget.parentElement;
+    dragShiftRef.current = coverShift;
+    setDragShift(coverShift);
+    setDragging(true);
   };
   useEffect(() => {
     if (!dragging) return;
     const move = (ev) => {
       const box = coverDragRef.current;
       if (!box) return;
+      if (ev.cancelable) ev.preventDefault();
       const rect = box.getBoundingClientRect();
       const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
-      const frac = (clientY - rect.top) / rect.height; // 0 сверху, 1 снизу
-      // центр = 0.5; переводим в сдвиг -0.32..0.32
+      const frac = (clientY - rect.top) / rect.height;
       let shift = (frac - 0.5) * 0.95;
       shift = Math.max(-0.32, Math.min(0.32, shift));
-      setCoverShift(shift);
+      dragShiftRef.current = shift;
+      setDragShift(shift); // лёгкое обновление — двигается только надпись-превью
     };
-    const up = () => setDragging(false);
+    const up = () => {
+      setDragging(false);
+      setCoverShift(dragShiftRef.current); // тяжёлая перерисовка один раз
+      setDragShift(null);
+    };
     window.addEventListener("mousemove", move);
     window.addEventListener("touchmove", move, { passive: false });
     window.addEventListener("mouseup", up);
@@ -1265,19 +1260,34 @@ export default function CarouselGenerator() {
                 <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                   <div className="text-sm text-emerald-700/70">{slides.length} слайдов · 1080×1350</div>
                   <div className="flex gap-2 flex-wrap">
-                    <button onClick={downloadZip} className="rounded-xl bg-emerald-700 text-white font-semibold px-4 py-2.5 text-sm hover:bg-emerald-600 transition-colors">
-                      ↓ Скачать всё (ZIP)
-                    </button>
-                    <button onClick={shareAll} className="rounded-xl border border-emerald-200 text-emerald-800 font-semibold px-4 py-2.5 text-sm hover:border-emerald-400 transition-colors">
-                      ↗ Поделиться
-                    </button>
+                    {isMobile && canShareFiles ? (
+                      <>
+                        <button onClick={shareAll} className="rounded-xl bg-emerald-700 text-white font-semibold px-4 py-2.5 text-sm hover:bg-emerald-600 transition-colors">
+                          ↗ Сохранить все в галерею
+                        </button>
+                        <button onClick={downloadZip} className="rounded-xl border border-emerald-200 text-emerald-800 font-semibold px-4 py-2.5 text-sm hover:border-emerald-400 transition-colors">
+                          ↓ ZIP
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={downloadZip} className="rounded-xl bg-emerald-700 text-white font-semibold px-4 py-2.5 text-sm hover:bg-emerald-600 transition-colors">
+                          ↓ Скачать всё (ZIP)
+                        </button>
+                        <button onClick={shareAll} className="rounded-xl border border-emerald-200 text-emerald-800 font-semibold px-4 py-2.5 text-sm hover:border-emerald-400 transition-colors">
+                          ↗ Поделиться
+                        </button>
+                      </>
+                    )}
                     <button onClick={newCarousel} className="rounded-xl border border-emerald-500/60 text-emerald-700 font-semibold px-4 py-2.5 text-sm hover:bg-emerald-500/10 transition-colors">
                       + Новая карусель
                     </button>
                   </div>
                 </div>
                 <p className="text-xs text-emerald-700/60 mb-1">
-                  💻 На компьютере: «Скачать всё (ZIP)» — один файл со всеми слайдами. 📱 На телефоне: зажми слайд → «Сохранить изображение».
+                  {isMobile
+                    ? "📱 «Сохранить все в галерею» → в меню выбери «Сохранить изображения» (айфон) или «Сохранить в галерею» / «Google Фото» (Android). Или зажми палец на слайде, чтобы сохранить по одному."
+                    : "💻 «Скачать всё (ZIP)» — один файл со всеми слайдами. 📱 На телефоне будет кнопка сохранения сразу в галерею."}
                 </p>
                 <p className="text-xs text-emerald-700/60 mb-3">
                   ✏️ Текст под каждым слайдом можно править вручную — картинка перерисуется. 🔍 Клик по слайду — крупный предпросмотр.
@@ -1297,9 +1307,19 @@ export default function CarouselGenerator() {
                           <div
                             onMouseDown={onCoverPointerDown}
                             onTouchStart={onCoverPointerDown}
-                            className="absolute inset-x-0 bottom-0 h-2/3 cursor-grab active:cursor-grabbing flex items-end justify-center pb-3"
+                            className="absolute inset-0 cursor-grab active:cursor-grabbing flex items-end justify-center pb-3"
                             title="Потяни, чтобы подвинуть заголовок"
+                            style={{ touchAction: "none" }}
                           >
+                            {dragging && dragShift != null && (
+                              <div
+                                className="absolute left-0 right-0 flex items-center justify-center pointer-events-none"
+                                style={{ top: (50 + dragShift * 100) + "%", transform: "translateY(-50%)" }}
+                              >
+                                <div className="w-full border-t-2 border-dashed border-white/80" />
+                                <span className="absolute bg-black/70 text-white text-[10px] font-semibold rounded-full px-2 py-0.5 whitespace-nowrap">сюда ляжет заголовок</span>
+                              </div>
+                            )}
                             <span className="rounded-full bg-black/55 backdrop-blur px-3 py-1 text-[10px] font-semibold text-white opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
                               ↕ потяни — двигать заголовок
                             </span>
